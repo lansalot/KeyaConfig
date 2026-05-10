@@ -58,7 +58,7 @@ const uint8_t CMD_EXIT_CONFIG[] = {0xFA, 0xFA, 0x00, 0xAA};
 const uint8_t CMD_TEST_DISABLE[] = {0x23, 0x0C, 0x20, 0x01};
 const uint8_t CMD_TEST_ENABLE[] = {0x23, 0x0D, 0x20, 0x01, 0x01, 0x90, 0x00, 0x00};
 
-IPAddress kIp(192, 168, 1, 126);
+IPAddress kIp(192, 168, 5, 126);
 IPAddress kSubnet(255, 255, 255, 0);
 IPAddress kGateway(0, 0, 0, 0);
 IPAddress kDns(0, 0, 0, 0);
@@ -104,6 +104,7 @@ bool debugCanRxLogs = false;
 bool inConfigMode = false;
 bool heartbeatSeenRecently = false;
 uint32_t lastHeartbeatAt = 0;
+bool awaitingManualFollowupRx = false;
 
 void updateReadPollFromResponse(uint8_t paramId, uint8_t readKind);
 void serviceReadPoll();
@@ -161,6 +162,18 @@ const char INDEX_HTML[] = R"HTML(
     table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
     th, td { border-bottom: 1px solid #ecf1ee; padding: 6px; text-align: left; }
     th { color: var(--muted); font-weight: 700; }
+    .param-table th,
+    .param-table td { padding: 4px 6px; }
+    .param-table input,
+    .param-table button {
+      min-height: 28px;
+      font-size: 13px;
+      padding: 4px 8px;
+    }
+    .param-table td.name-cell {
+      font-weight: 700;
+      color: #0f2f24;
+    }
     input, select, button {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -234,10 +247,13 @@ const char INDEX_HTML[] = R"HTML(
       .bar label { font-size: 12px; }
       #manId, #manPayload, #manExt, #canSpeed { width: 100%; min-width: 0; }
       .table-wrap { max-height: none; overflow: visible; }
-      .param-table { min-width: 0; border-collapse: separate; border-spacing: 0 10px; }
+      .param-table { min-width: 0; border-collapse: separate; border-spacing: 0 8px; }
       .param-table thead { display: none; }
-      .param-table tbody, .param-table tr, .param-table td { display: block; width: 100%; }
+      .param-table tbody { display: block; width: 100%; }
       .param-table tr {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr 1fr auto;
+        gap: 6px;
         border: 1px solid var(--line);
         border-radius: 12px;
         background: #fff;
@@ -245,23 +261,46 @@ const char INDEX_HTML[] = R"HTML(
         padding: 8px;
       }
       .param-table td {
-        border-bottom: 1px dashed #e3ece7;
-        padding: 6px 0;
+        border-bottom: 0;
+        padding: 0;
         word-break: break-word;
       }
-      .param-table td:last-child { border-bottom: 0; }
       .param-table td::before {
-        content: attr(data-label);
         display: block;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 700;
         color: var(--muted);
-        margin-bottom: 3px;
+        margin-bottom: 2px;
         text-transform: uppercase;
         letter-spacing: .04em;
       }
+      .param-table td.name-cell {
+        grid-column: 1 / -1;
+        padding-bottom: 2px;
+      }
+      .param-table td.cell-id,
+      .param-table td.cell-range {
+        display: none;
+      }
+      .param-table td.cell-param::before { content: 'Param'; }
+      .param-table td.cell-ram::before { content: 'RAM'; }
+      .param-table td.cell-rom::before { content: 'ROM'; }
+      .param-table td.cell-new::before { content: 'New'; }
+      .param-table td.cell-write::before { content: 'Write'; }
       .param-table input,
-      .param-table button { width: 100%; }
+      .param-table button {
+        width: 100%;
+        min-height: 20px;
+        font-size: 13px;
+        padding: 4px 6px;
+      }
+      .param-table td.cell-new input,
+      .param-table td.cell-write button {
+        min-height: 20px;
+        font-size: 13px;
+        padding: 4px 6px;
+      }
+      .param-table td.name-cell { font-weight: 700; }
       .status { word-break: break-word; }
     }
   </style>
@@ -330,7 +369,7 @@ const char INDEX_HTML[] = R"HTML(
           </div>
           <div class="bar">
             <label>Payload bytes (hex, space separated)</label>
-            <input id="manPayload" value="" />
+            <input id="manPayload" value="0x40 0x12 0x21 0x01" />
             <button class="primary" id="btnManualSend">Send</button>
           </div>
           <p style="font-size:12px;color:#597569">Testing page only. No automatic safety or deadman behavior is enforced.</p>
@@ -393,14 +432,14 @@ function addLog(line) {
 
 function rowHtml(p) {
   return `<tr id="r${p.id}">
-    <td data-label="Name">${p.name}</td>
-    <td data-label="ID">${String(p.id).padStart(4,'0')}</td>
-    <td data-label="Param" id="p${p.id}_0"></td>
-    <td data-label="RAM" id="p${p.id}_1"></td>
-    <td data-label="ROM" id="p${p.id}_2"></td>
-    <td data-label="New"><input class="small" id="n${p.id}"/></td>
-    <td data-label="Write"><button class="write-now-btn" onclick="queueWrite(${p.id})" disabled>Write Now</button></td>
-    <td data-label="Range">${p.range}</td>
+    <td data-label="Name" class="name-cell">${p.name}</td>
+    <td data-label="ID" class="cell-id">${String(p.id).padStart(4,'0')}</td>
+    <td data-label="Param" class="cell-param" id="p${p.id}_0"></td>
+    <td data-label="RAM" class="cell-ram" id="p${p.id}_1"></td>
+    <td data-label="ROM" class="cell-rom" id="p${p.id}_2"></td>
+    <td data-label="New" class="cell-new"><input class="small" id="n${p.id}"/></td>
+    <td data-label="Write" class="cell-write"><button class="write-now-btn" onclick="queueWrite(${p.id})" disabled>Write</button></td>
+    <td data-label="Range" class="cell-range">${p.range}</td>
   </tr>`;
 }
 
@@ -772,6 +811,36 @@ void parseCanResponse(const CAN_message_t& msg) {
 void processCanRx() {
   CAN_message_t msg;
   while (can3.read(msg)) {
+    if (awaitingManualFollowupRx) {
+      if (msg.id == KEYA_RESPONSE_ID) {
+        String rx = "RX(manual-followup):" + String(msg.id, HEX) + " ";
+        for (uint8_t i = 0; i < msg.len; ++i) {
+          if (msg.buf[i] < 16) {
+            rx += "0";
+          }
+          rx += String(msg.buf[i], HEX);
+          if (i + 1 < msg.len) {
+            rx += " ";
+          }
+        }
+        wsServer.broadcastTXT(rx);
+        awaitingManualFollowupRx = false;
+      } else if (msg.id == KEYA_HEARTBEAT_ID) {
+        String rx = "RX(manual-followup):" + String(msg.id, HEX) + " ";
+        for (uint8_t i = 0; i < msg.len; ++i) {
+          if (msg.buf[i] < 16) {
+            rx += "0";
+          }
+          rx += String(msg.buf[i], HEX);
+          if (i + 1 < msg.len) {
+            rx += " ";
+          }
+        }
+        wsServer.broadcastTXT(rx);
+        awaitingManualFollowupRx = false;
+      }
+    }
+
     if (msg.id == KEYA_HEARTBEAT_ID) {
       lastHeartbeatAt = millis();
       if (!heartbeatSeenRecently) {
@@ -889,6 +958,7 @@ void parseManualCommand(const String& payload) {
   }
 
   sendCanFrame(id, ext, data, len);
+  awaitingManualFollowupRx = true;
   wsStatus("Manual frame sent");
 }
 
