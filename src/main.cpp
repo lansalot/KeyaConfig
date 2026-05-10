@@ -921,15 +921,15 @@ void sendTestDisable() {
 
 void sendTestSteer(int16_t steerSpeed) {
   uint8_t cmd[8] = {0x23, 0x00, 0x20, 0x01, 0x00, 0x00, 0x00, 0x00};
-  uint16_t encodedSpeed = static_cast<uint16_t>(steerSpeed);
-  cmd[4] = highByte(encodedSpeed);
-  cmd[5] = lowByte(encodedSpeed);
-
+  steerSpeed *= -1;
+  cmd[4] = highByte(steerSpeed);
+  cmd[5] = lowByte(steerSpeed);
+  
   // Match reference control logic: left uses 0xFFFF, right uses 0x0000.
   bool isLeft = steerSpeed < 0;
   cmd[6] = isLeft ? 0xFF : 0x00;
   cmd[7] = isLeft ? 0xFF : 0x00;
-    
+  
   sendCanFrame(KEYA_DRIVE_ID, true, cmd, sizeof(cmd));
   sendCanFrame(KEYA_DRIVE_ID, true, CMD_TEST_ENABLE, sizeof(CMD_TEST_ENABLE));
 }
